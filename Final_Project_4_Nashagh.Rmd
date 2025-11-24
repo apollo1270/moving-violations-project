@@ -1,0 +1,445 @@
+---
+title: "Moving Violations — Deliverable (HTML)"
+author: "Isaac Nashagh"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: '2'
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+    
+```{r}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(lubridate)
+library(kableExtra)
+library(leaflet)
+```
+Data:
+
+```{r}
+data_file <- "C:/Users/Isaac/OneDrive/Documents/Moving_Violations_Issued_in_October_2024.xlsx"
+
+raw <- read_excel(data_file)
+dat <- raw %>% janitor::clean_names()
+```
+
+```{r}
+
+
+# convert all dates to a more usable format 
+possible_dates <- c("issue_date","issuedate","viol_date","violation_date","date","issue_dt")
+for (nm in intersect(names(dat), possible_dates)) {
+  dat[[nm]] <- suppressWarnings(lubridate::ymd_hms(dat[[nm]], quiet = TRUE))
+  # Convert issue_time
+if ("issue_time" %in% names(dat)) {
+dat <- dat %>%
+mutate(
+issue_time_str = sprintf("%04d", issue_time),              # pad with zeros
+issue_time_readable = suppressWarnings(lubridate::hm(paste0(substr(issue_time_str, 1, 2), ":", substr(issue_time_str, 3, 4))))
+)
+}
+
+glimpse(dat$issue_time_readable)
+
+  if (all(is.na(dat[[nm]]))) dat[[nm]] <- suppressWarnings(lubridate::ymd(dat[[nm]], quiet = TRUE))
+}
+
+glimpse(dat)
+
+```
+
+
+```{r}
+#labels columns as numerical, date, or
+var_type <- function(x) {
+if (is.numeric(x)) {
+"numeric"
+} else if (inherits(x, "Date") || inherits(x, "POSIXct") || inherits(x, "POSIXt")) {
+"date/time"
+} else {
+"categorical/text"
+}
+}
+
+
+data_dict <- tibble(
+variable = names(dat),
+type = purrr::map_chr(dat, var_type),
+n_missing = purrr::map_int(dat, ~ sum(is.na(.x))),
+n_unique = purrr::map_int(dat, ~ dplyr::n_distinct(.x, na.rm = TRUE)),
+example_value = purrr::map_chr(dat, ~ {
+ex <- .x[which(!is.na(.x))[1]]
+if (length(ex) == 0) return("-")
+as.character(ex)
+}),
+description = c(
+# 1 objectid
+"Unique ID for each record",
+# 2 location
+"Street address or block of the violation",
+# 3 xcoord
+"X coordinate (projected/DC grid)",
+# 4 ycoord
+"Y coordinate (projected/DC grid)",
+# 5 issue_date
+"Date/time when the violation was issued",
+# 6 issue_time
+"Time of day in HHMM format (e.g., 1622 = 4:22 PM)",
+# 7 issuing_agency_code
+"Numeric code for the issuing agency",
+# 8 issuing_agency_name
+"Full name of the issuing agency",
+# 9 issuing_agency_short
+"Abbreviation of the issuing agency",
+# 10 violation_code
+"Alphanumeric code for the violation",
+# 11 violation_process_desc
+"Text description of the violation type",
+# 12 plate_state
+"State that issued the vehicle’s license plate",
+# 13 accident_indicator
+"Indicator if an accident was involved (Y/N)",
+# 14 disposition_code
+"Numeric code for the case disposition",
+# 15 disposition_type
+"Text outcome/status (e.g., Paid, Other)",
+# 16 disposition_date
+"Date the disposition was finalized (if any)",
+# 17 fine_amount
+"Fine amount (USD)",
+# 18 total_paid
+"Total amount paid (USD)",
+# 19 penalty_1
+"Additional penalty amount 1 (USD)",
+# 20 penalty_2
+"Additional penalty amount 2 (USD)",
+# 21 penalty_3
+"Additional penalty amount 3 (USD)",
+# 22 penalty_4
+"Additional penalty amount 4 (USD)",
+# 23 penalty_5
+"Additional penalty amount 5 (USD)",
+# 24 rp_mult_owner_no
+"Related property/owner number",
+# 25 body_style
+"Vehicle body type (mostly missing in this dataset)",
+# 26 latitude
+"Geographic latitude of the location",
+# 27 longitude
+"Geographic longitude of the location",
+# 28 mar_id
+"Map Reference/parcel ID for spatial join",
+# 29 gis_last_mod_dttm
+"Date/time of last GIS modification",
+# 30 issue_time_str
+"Formatted issue time string (HHMM padded for readability)",
+# 31 issue_time_readable
+"Converted issue time as a proper time object"
+)
+
+)
+
+
+
+data_dict %>%
+kbl(caption = "Data Dictionary — with Descriptions") %>%
+kable_classic(full_width = FALSE)
+```
+This dataset shows moving violations with categorical, numerical, and date fields. 
+The table lists all the variables and shows the number of missing values, unique values, and an example row. 
+Data Cleaning
+
+Data cleaning steps included:
+Standardizing names with clean_names()
+Parsing dates/times using ymd_hms() and hm()
+Creating a readable issue time variable (issue_time_readable)
+Assessing each variable’s type (numeric, date/time, or categorical)
+
+The dataset was tidy upon finding it. 
+
+
+
+
+```{r}
+#summary for number variables
+num_vars <- dat %>% select(where(is.numeric))
+if (ncol(num_vars) > 0) {
+summary(num_vars) %>%
+kbl(caption="Summary statistics for numeric variables") %>%
+kable_classic(full_width = FALSE)
+} else {
+cat("No numeric variables detected.\n")
+}
+
+```
+This summary table shows the characteristics of the numeric columns.
+Most variables show realistic values, although fines and penalties have much higher means than medians, indicating outliers. 
+
+
+
+Exploratory Data Analysis:
+```{r}
+
+clean_title <- function(x) {
+  x <- gsub("_", " ", x)          
+  x <- tools::toTitleCase(x)       
+  return(x)
+}
+
+
+hist_vars <- c("issue_time_readable", "issue_date", "fine_amount")
+selected_vars <- hist_vars[hist_vars %in% names(dat)]
+
+for (v in selected_vars) {
+
+  # Hour
+  if (v == "issue_time_readable" && "issue_time_readable" %in% names(dat)) {
+    dat %>%
+      filter(!is.na(issue_time_readable)) %>%
+      mutate(hour = lubridate::hour(issue_time_readable)) %>%
+      ggplot(aes(x = hour)) +
+      geom_histogram(binwidth = 1, fill = "blue", color = "white") +
+      scale_x_continuous(breaks = seq(0, 23, 2)) +
+      labs(
+        title = "Violations by Hour of Day",
+        x = "Hour of Day",
+        y = "Number of Violations"
+      ) +
+      theme_minimal() -> p
+    print(p)
+  }
+
+  # Issue date
+  else if (inherits(dat[[v]], "POSIXct") || inherits(dat[[v]], "Date")) {
+    ggplot(dat, aes(x = !!sym(v))) +
+      geom_histogram(bins = 30, fill = "turquoise", color = "white") +
+      labs(
+        title = paste("Distribution of", clean_title(v)),
+        x = "Date",
+        y = "Count"
+      ) +
+      theme_minimal() -> p
+    print(p)
+  }
+
+  # Fine
+  else if (v == "fine_amount" && is.numeric(dat[[v]])) {
+    ggplot(dat, aes(x = fine_amount)) +
+      geom_histogram(binwidth = 20, fill = "navy", color = "white") +
+      scale_x_continuous(labels = scales::dollar_format()) +
+      labs(
+        title = "Distribution of Fine Amount",
+        x = "Fine Amount (USD)",
+        y = "Count"
+      ) +
+      theme_minimal() -> p
+    print(p)
+  }
+}
+
+
+
+
+```
+Hours of Day:
+This histogram shows the distribution of moving violations across different hours of the day. Violations heavily increase around 6:00 AM and peak during typical daytime/early evening hours (9-5), and remain relatively high until around 8PM. After midnight, violations decrease steadily, reaching the lowest level at 4AM. This reflects common traffic patterns but also may suggest that ticketing agencies slow operations late at night. 
+
+Issue Date:
+The distribution of issue dates indicates that moving violations were issued consistently throughout October 2024. There are no significant gaps or irregularities in the daily counts. The peak on October 16th may be attributed to Ethel Kennedy's memorial service, as the city released announcements warning of increased traffic on this day. This consistency supports the reliability of the dataset and indicates that the volume of violations was not influenced by outages, reporting delays, or many large events that might otherwise distort daily totals.
+
+Fine Amount:
+The fine amounts have a strongly right-skewed distribution as the majority of citations are lower values with a right skewed tail of heavier penalties. Most violations appear to carry relatively small fines from standard traffic infractions, while the higher minority is from more serious offenses, namely speeding 20MPH over the limit. This skew explains the large gap between the mean and median reported in the summary statistics.
+
+
+
+```{r}
+# Top issuing agencies and violation types
+if ("issuing_agency_name" %in% names(dat) & "violation_process_desc" %in% names(dat)) {
+
+  # Top 10 agencies
+  top_agencies <- dat %>%
+    count(issuing_agency_name, sort = TRUE) %>%
+    slice_head(n = 10)
+
+  ggplot(top_agencies, aes(x = reorder(issuing_agency_name, n), y = n)) +
+    geom_col(fill = "orange", color = "black") +
+    coord_flip() +
+    labs(
+      title = "Top 10 Issuing Agencies",
+      x = "Agency Name",
+      y = "Number of Violations"
+    ) +
+    theme_minimal()
+
+  # Top 10 violation types
+  top_violations <- dat %>%
+    count(violation_process_desc, sort = TRUE) %>%
+    slice_head(n = 10)
+
+  ggplot(top_violations, aes(x = reorder(violation_process_desc, n), y = n)) +
+    geom_col(fill = "blue", color = "black") +
+    coord_flip() +
+    labs(
+      title = "Top 10 Violation Types",
+      x = "Violation Description",
+      y = "Number of Violations"
+    ) +
+    theme_minimal()
+}
+```
+This graph shows the most frequent violation types. It is headed by moderate speeding (11-15mph over the speed limit). This suggests that speeding enforcement is likely a primary focus of traffic control in D.C. and that other infractions are much less common as this category has more violations than every other category combined. The top 4 violations make up more than 90% of all violations recorded.
+
+
+```{r fig.height=6, fig.width=8, message=FALSE, warning=FALSE}
+map_data <- dat %>%
+  filter(!is.na(latitude), !is.na(longitude))
+
+
+if (nrow(map_data) > 20000) {
+  map_data <- sample_n(map_data, 20000)
+}
+
+ggplot(map_data, aes(x = longitude, y = latitude)) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_fill_viridis_c(option = "C", direction = -1) +
+  labs(
+    title = "Concentration of Moving Violations in Washington, D.C.",
+    x = "Longitude",
+    y = "Latitude",
+    fill = "Violation Density"
+  ) +
+  coord_fixed() +
+  theme_minimal()
+
+
+```
+This map uses the latitude and longitude coordinates to plot every citation in the dataset, with its marker color associated with the agency that issued the ticket. The densest areas include downtown areas, federal buildings, and high traffic roads. This means that violations are centered in either high activity and high enforcement zones. 
+
+
+```{r}
+#Find Missing data and arrange it
+missing_tbl <- tibble(
+variable = names(dat),
+missing = map_int(dat, ~ sum(is.na(.x))),
+percent_missing = round(map_dbl(dat, ~ mean(is.na(.x)) * 100), 2)
+)
+
+missing_tbl %>%
+arrange(desc(percent_missing)) %>%
+kbl(caption = "Missing Value Summary") %>%
+kable_classic(full_width = FALSE)
+```
+This table shows the amount of missing values in the variables.
+A high percentage would likely disqualify a variable from being used to make inferences and a moderate percentage would warrant caution. The variables with missing data include body type and disposition date; both are optional in reports, meaning the missing variables in no way impacts the reliability of this dataset. 
+
+
+```{r}
+
+# Check for outliers using IQR and ignores non-numeric types
+num_vars <- dat %>%
+  select(where(is.numeric))
+
+if (ncol(num_vars) > 0) {
+  outliers <- map_dfr(names(num_vars), function(v) {
+    x <- num_vars[[v]]
+    x <- x[!is.na(x)]
+    
+    # Skip columns with too few unique values
+    if (length(unique(x)) < 4) return(tibble(variable = v, outliers = 0))
+    
+    # IQR method
+    q1 <- quantile(x, 0.25)
+    q3 <- quantile(x, 0.75)
+    iqr <- q3 - q1
+    low <- q1 - 1.5 * iqr
+    high <- q3 + 1.5 * iqr
+    
+    tibble(variable = v, outliers = sum(x < low | x > high))
+  })
+  
+  outliers %>%
+    arrange(desc(outliers)) %>%
+    kbl(caption = "Potential Outliers by Variable") %>%
+    kable_classic(full_width = FALSE)
+} else {
+  cat("No numeric variables found for outlier detection.\n")
+}
+
+
+```
+This shows the outliers in the dataset. 
+Having this information clearly presented more easily allows me to identify what causes things like the right - skew of the fines in the dataset. 
+
+
+
+Full Report:
+
+
+Libraries Used:
+
+tidyverse – data manipulation and plotting
+readxl – importing the Excel dataset
+janitor – consistent variable name cleaning
+lubridate – parsing and handling dates/times
+kableExtra – formatting summary tables
+
+
+
+Purpose:
+
+The goal of this project is to analyze the moving violations issued in Washington, D.C. during October 2024 and understand the factors that influence where and when violations occur. This includes identifying:
+
+-When during the day violations are most common
+-Which agencies issue the most citations
+-The most frequently issued violation types
+-How fines and penalties are distributed
+-Where violations cluster geographically
+  -Determine if this is influeced by the presence of Federal buildings or police stations
+
+
+
+Results:
+
+The analysis uses descriptive statistics and data visualizations to uncover trends in time, location, fine amounts, and enforcement type. Histograms were used to explore continuous variables, bar charts for categorical rankings, and geospatial density plots to visualize location-based patterns.
+
+Key Findings
+
+-Violations peak during daytime and early evening hours, with the lowest activity between 2 AM and 5 AM.
+-October 16th showed a spike in citations, likely due to increased traffic from Ethel Kennedy's memorial service.
+-Moderate speeding (11–15 mph over limit) overwhelmingly dominates the dataset.
+-Only a small number of agencies issue the majority of citations.
+-Fine amounts are heavily right-skewed, with most violations resulting in lower fines but a few severe cases driving up the average.
+-Geographically, violations cluster around downtown, government buildings, and high-traffic roads.
+
+
+
+Conclusions:
+
+The dataset provides a reliable and comprehensive look at moving violations in Washington, D.C. Violations largely occur during peak activity hours and are heavily concentrated in areas with high traffic flow or high enforcement presence. The dominance of speeding violations suggests either widespread speeding behavior or targeted enforcement strategies. Outliers in fine amounts contribute to skewed distributions but are limited in number.
+
+Limitations:
+
+Only includes a single month
+No speed-limit data provided
+
+Future Work:
+
+-Map violations by ward or neighborhood
+-Include D.C. boundary shapefiles for improved mapping
+-Explore relationships between violation type and time of day
+-Define specific School and Construction zone violations in data
+
+
+
+Summary:
+
+This project analyzes moving violations issued across Washington, D.C. in October 2024 using a dataset from the D.C. Open Data Portal. The analysis explores patterns across time, violation type, issuing agency, fine amounts, and geographic distribution. After cleaning and formatting the dataset, visualizations were created to identify trends and summarize enforcement behavior throughout the month.
+
+Overall, violations were issued consistently across the month, with clear peaks during daytime and early evening hours. Moderate speeding violations far outweighed all other categories, and most citations involved small fines with a long right-skewed tail of more serious penalties. Spatial patterns reveal dense clusters near high-traffic areas, government buildings, and major roadways. The dataset proved to be highly complete and reliable, allowing for meaningful insights into traffic violation and enforcement patterns within the city.
